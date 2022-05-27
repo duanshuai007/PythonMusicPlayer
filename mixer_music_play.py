@@ -7,9 +7,23 @@ from tkinter import filedialog
 from tkinter import ttk
 from ttkthemes import themed_tk as tk
 from mutagen.mp3 import MP3
+from mutagen.mp4 import MP4
 import pygame
 import random
 
+from logger import LoggingProducer, LoggingConsumer
+from m4a_2_mp3 import *
+
+LoggingConsumer()
+
+
+
+def resource_path(relative_path):
+    if getattr(sys, 'frozen', False):   #是否Bundle Resource
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.abspath('.')
+    return os.path.join(base_path, relative_path)
 
 '''
 MODE:1/2/3
@@ -17,14 +31,14 @@ VOLUME:0-100
 THEME:xxxxxx
 '''
 class Config():
-    
-    CONFIG_FILE = "./.config"
     __save_par = {
         "VOLUME" : "",
         "MODE" : "",
         "THEME" : ""
     }
+    CONFIG_FILE = ".config"
     def __init__(self):
+        self.CONFIG_FILE = resource_path(self.CONFIG_FILE)
         if not os.path.exists(self.CONFIG_FILE):
             with open(self.CONFIG_FILE, "w") as f:
                 message = "MODE:1\nVOLUME:70\nTHEME:ubuntu\n"
@@ -61,9 +75,8 @@ class Config():
         else:
             print("set key not exists:{}".format(key))
 
-    
-class BigFishMusicPlayer():
-    
+
+class BFMusicPlayer():
     pause_flag = False
     load_flag = False
     root = None
@@ -83,9 +96,32 @@ class BigFishMusicPlayer():
     RANDOM_MODE     = 2
     SINGLE_MODE     = 3
     __playmode = SHUNXU_MODE
-    __curr_play_item_number = 0
+    __curr_play_item_number = -1
+    __curr_musicplay_ts = 0
+    __is_play_m4a_file = False
+    cm4a_list = []
+    __button_img_prex = "./image/prex.png"
+    __button_img_next = "./image/next.png"
+    __button_img_play = "./image/play.png"
+    __button_img_pause = "./image/pause.png"
+    __button_img_random = "./image/random_play.png"
+    __button_img_single = "./image/single_play.png"
+    __button_img_shunxu = "./image/shunxu_play.png"
+    #Scale控件在使用set函数时也会调用command指定的函数，没有找到好的解决方式，
+    #使用该变量作为过滤条件，否则会造成音乐循环播放同一秒无法前进
+    __is_setpos_inuse = False
     
     def __init__(self):
+        self.logger = LoggingProducer().getlogger()
+        self.__button_img_prex = resource_path(self.__button_img_prex)
+        self.__button_img_next = resource_path(self.__button_img_next)
+        self.__button_img_play = resource_path(self.__button_img_play)
+        self.__button_img_pause = resource_path(self.__button_img_pause)
+        self.__button_img_random = resource_path(self.__button_img_random)
+        self.__button_img_single = resource_path(self.__button_img_single)
+        self.__button_img_shunxu = resource_path(self.__button_img_shunxu)
+        self.PLAYLIST_FILE = resource_path(self.PLAYLIST_FILE)
+        
         self.conf = Config()
         self.__playmode = int(self.conf.get("MODE"), 10)
         self.__volume = int(self.conf.get("VOLUME"), 10)
@@ -97,14 +133,14 @@ class BigFishMusicPlayer():
         self.scale.set(self.__volume)
         if self.__playmode == self.SHUNXU_MODE:
             self.__playmode = self.RANDOM_MODE
-            self.playmodeBtn['text'] = "随"
+            self.playmodeBtn['image'] = self.__random_play_img
         elif self.__playmode == self.RANDOM_MODE:
             self.__playmode = self.SINGLE_MODE
-            self.playmodeBtn['text'] = "单"
+            self.playmodeBtn['image'] = self.__single_play_img
         elif self.__playmode == self.SINGLE_MODE:
             self.__playmode = self.SHUNXU_MODE
-            self.playmodeBtn['text'] = "顺"
-            
+            self.playmodeBtn['image'] = self.__shunxu_play_img
+        self.cm4a = ChangeM4AToMP3()
         t = threading.Thread(target = self.show_animation, args=[])
         t.setDaemon(True)
         t.start()
@@ -114,59 +150,94 @@ class BigFishMusicPlayer():
             if music_file_name.endswith(".mp3"):
                 a = MP3(music_file_name)
                 self.music_total_time = int(a.info.length)
-            else:
+            elif music_file_name.endswith(".wav"):
                 a = pygame.mixer.Sound(music_file_name)
                 self.music_total_time = a.get_length()
-            print("total length:{}".format(self.music_total_time))
-            pygame.mixer.music.load(music_file_name)
-            pygame.mixer.music.set_endevent(self.musci_end_event)
-            #file_data = os.path.splitext(music_file_name)
-            #name = music_file_name.split('/')[-1]
-            name = os.path.basename(music_file_name)
-            self.music_name_label['text'] = name
-            
+            elif music_file_name.endswith(".m4a"):
+                a = MP4(music_file_name)
+                self.music_total_time = int(a.info.length)
+            self.logger.info("filename:{} times:{}".format(music_file_name, self.music_total_time))
+            #pygame.mixer.music.unload()
             self.music_time_mins, self.music_time_secs = divmod(self.music_total_time, 60)
             self.music_time_mins = round(self.music_time_mins)
             self.music_time_secs = round(self.music_time_secs)
             self.music_time_label['text'] = "00:00 / {:02d}:{:02d}".format(self.music_time_mins, self.music_time_secs)
-            #print(self.music_time_label['text'])
+            self.musciplay_time_scale['to'] = self.music_total_time
+            self.music_name_label['text'] = os.path.basename(music_file_name)
+            self.musciplay_time_scale.set(0)
+            if music_file_name.endswith(".mp3") or music_file_name.endswith(".wav"):
+                pygame.mixer.music.load(music_file_name)
+                self.__is_play_m4a_file = False
+                pygame.mixer.music.set_endevent(self.musci_end_event)
+            elif music_file_name.endswith(".m4a"):
+                self.cm4a.change_m4a_to_mp3(music_file_name)
+                self.cm4a_list = self.cm4a.get_curr_m4a_list()
+                self.cm4a_playno = 0
+                pygame.mixer.music.load(self.cm4a_list[self.cm4a_playno])
+                self.__is_play_m4a_file = True
+                if len(self.cm4a_list) >= 2:
+                    pygame.mixer.music.queue(self.cm4a_list[self.cm4a_playno+1])
+                pygame.mixer.music.set_endevent(self.musci_end_event)
+                pass
             self.load_flag = True
         except Exception as e:
-            print("load_music_file:{} err:{}".format(music_file_name, e))
+            self.logger.info("load_music_file:{} err:{}".format(music_file_name, e))
 
     def play_music(self):
         if pygame.mixer.music.get_busy() is True:
-            print("pause")
             pygame.mixer.music.pause()
-            self.playBtn['text'] = "播放"
             self.pause_flag = True
+            self.playBtn['image'] = self.play_img
         else:
             if self.pause_flag is True:
-                print("unpause")
                 pygame.mixer.music.unpause()
-                self.playBtn['text'] = "暂停"
                 self.pause_flag = False
+                self.playBtn['image'] = self.pause_img
             else:
-                print("play")
                 if self.load_flag is False:
                     self.__curr_play_item_number = 0
                     self.load_music_file(self.music_file_list[self.__curr_play_item_number])
-                print("activate:{}".format(self.__curr_play_item_number))
                 self.playlistbox.selection_set(self.__curr_play_item_number)
                 pygame.mixer.music.play()
-                self.playBtn['text'] = "暂停"
+                self.playBtn['image'] = self.pause_img
 
     def set_vol(self, val):
         #val是字符串类型的浮点数，不能通过int函数直接转换
         if type(val) is str:
             intstr,littlestr = val.split('.')
-            #print("setvol:val={} type={}".format(val, type(val)))
             self.conf.set("VOLUME", intstr)
         else:
             self.conf.set("VOLUME", "{}".format(val))
         volume = float(val) / 100
         pygame.mixer.music.set_volume(volume)
 
+    def set_musci_play_time(self, val):
+        #self.logger.info("set_musci_play_time:{} type={}".format(val, type(val)))
+        if self.__is_setpos_inuse is False:
+            try:
+                s = int(val.split('.')[0])
+                self.__curr_musicplay_ts = s
+            except Exception as e:
+                self.logger.error("set_musci_play_time val:{} err:{}".format(val, e))
+            if pygame.mixer.music.get_busy():
+                if self.__is_play_m4a_file is True:
+                    if s < self.cm4a.first_section_times:
+                        self.cm4a_playno = 0
+                        ss = s
+                    else:
+                        nn = int((s - self.cm4a.first_section_times) / self.cm4a.section_times) + 1
+                        ss = int((s - self.cm4a.first_section_times) % self.cm4a.section_times)
+                        self.cm4a_playno = nn
+                    #self.logger.info("set_musci_play_time m4a:playno={} ss={}".format(self.cm4a_playno, ss))
+                    pygame.mixer.music.load(self.cm4a_list[self.cm4a_playno])
+                    if self.cm4a_playno < len(self.cm4a_list) - 2:
+                        pygame.mixer.music.queue(self.cm4a_list[self.cm4a_playno+1])
+                    pygame.mixer.music.play()
+                    pygame.mixer.music.set_pos(ss)
+                else:
+                    pygame.mixer.music.play()
+                    pygame.mixer.music.set_pos(s)
+    
     def __music_next(self):
         e = pygame.event.Event(self.music_next_event, attr=None)
         pygame.event.post(e)
@@ -179,48 +250,56 @@ class BigFishMusicPlayer():
         try:
             filename_path = filedialog.askdirectory()
             if len(filename_path) > 0:
-                print("__add_music_dir:{}".format(filename_path))
+                self.logger.info("__add_music_dir:{}".format(filename_path))
                 s = os.listdir(filename_path)
-                print(s)
+                self.logger.info(s)
                 for i in s:
-                    if i.endswith(".mp3") or i.endswith(".wav"):
-                        fullpath_music_name = "{}/{}".format(filename_path, i)
-                        self.music_file_list.append(fullpath_music_name)
-                        with open(self.PLAYLIST_FILE, "a") as f:
-                            f.write("{}\n".format(fullpath_music_name))
-                        name = os.path.basename(i)
-                        self.playlistbox.insert("end", name)
+                    if i.endswith(".mp3") or i.endswith(".wav") or i.endswith(".m4a"):
+                        if i not in self.music_file_list:
+                            fullpath_music_name = "{}/{}".format(filename_path, i)
+                            self.music_file_list.append(fullpath_music_name)
+                            with open(self.PLAYLIST_FILE, "a") as f:
+                                f.write("{}\n".format(fullpath_music_name))
+                            name = os.path.basename(i)
+                            self.playlistbox.insert("end", name)
         except Exception as e:
-            print("browse_file err:{}".format(e))
+            self.logger.info("browse_file err:{}".format(e))
             
     def __add_music_file(self):
         try:
-            filename_path = filedialog.askopenfilename()
-            if filename_path.endswith(".mp3") or filename_path.endswith(".wav"):
-                self.music_file_list.append(filename_path)
-                with open(self.PLAYLIST_FILE, "a") as f:
-                    f.write("{}\n".format(filename_path))
-                name = os.path.basename(filename_path)
-                self.playlistbox.insert("end", name)
+            #askopenfilenames可以添加多个文件 askopenfilename添加单个文件
+            filename_path = filedialog.askopenfilenames(title = "音乐播放器", filetypes =[("mp3文件","*.mp3"),("WMA文件","*.wma"),("WAV文件","*.wav"),("M4A文件", "*.m4a")])   
+            #if filename_path.endswith(".mp3") or filename_path.endswith(".wav"):
+            for i in filename_path:
+                if i not in self.music_file_list:
+                    self.music_file_list.append(i)
+                    with open(self.PLAYLIST_FILE, "a") as f:
+                        f.write("{}\n".format(i))
+                    name = os.path.basename(i)
+                    self.playlistbox.insert("end", name)
             #print("__add_music_file:{}".format(self.music_file_list))
         except Exception as e:
-            print("browse_file err:{}".format(e))
+            self.logger.info("browse_file err:{}".format(e))
     
     def __double_click_playlist_item(self, v):
-        #print(self.playlistbox.curselection())
+        self.logger.info(self.playlistbox.curselection())
         #s = self.playlistbox.get(self.playlistbox.curselection())
         #print("double click:{}".format(v))
-        self.playlistbox.selection_clear(self.__curr_play_item_number)
-        self.__curr_play_item_number = self.playlistbox.curselection()[0]
-        self.load_music_file(self.music_file_list[self.__curr_play_item_number])
-        self.play_music()
-        
-    def __rightclick_playlist_item(self, v):
+        try:
+            #if self.__curr_play_item_number >= 0:
+            #    self.playlistbox.selection_clear(self.__curr_play_item_number)
+            self.__curr_play_item_number = self.playlistbox.curselection()[0]
+            self.load_music_file(self.music_file_list[self.__curr_play_item_number])
+            self.play_music()
+        except Exception as e:
+            self.logger.error("__double_click_playlist_item err:{}".format(e))
+
+    def __right_click_playlist_item(self, v):
         #print("__rightclick_playlist_item:{}".format(v))
         self.playlistbox.selection_clear(self.__curr_play_item_number)
         self.__curr_play_item_number = self.playlistbox.nearest(v.y)
         self.playlistbox.selection_set(self.__curr_play_item_number)
-        s = self.playlistbox.get(self.__curr_play_item_number)
+        #s = self.playlistbox.get(self.__curr_play_item_number)
         #print(s)
         try:
             #第三个参数设置为0 则弹出菜单可以无限制创建
@@ -232,7 +311,7 @@ class BigFishMusicPlayer():
         pass
     def __playlist_item_delete(self):
         s = self.playlistbox.get(self.__curr_play_item_number)
-        print("__playlist_item_delete:{}".format(s))
+        self.logger.info("__playlist_item_delete:{}".format(s))
         #需要在3个地方进行删除
         #1.playlistbox中进行删除,根据索引进行删除
         self.playlistbox.delete(self.__curr_play_item_number)
@@ -246,12 +325,8 @@ class BigFishMusicPlayer():
         wh = open("./.temp", "w");
         with open(self.PLAYLIST_FILE, "r") as f:
             m = f.readlines()
-            #print("+====================")
-            #print(m)
             for i in m:
-                if s in i:
-                    pass
-                else:
+                if s not in i:
                     wh.write(i)
         wh.close()
         os.remove(self.PLAYLIST_FILE)
@@ -260,26 +335,26 @@ class BigFishMusicPlayer():
         
     def __set_theme_1(self):
         s = self.userChoice.get()
-        print("__set_theme_1:{}".format(s))
+        self.logger.info("__set_theme_1:{}".format(s))
         self.root.set_theme(s)
-        #with open(self.THEME_CONF_FILE, "w") as f:
-        #    f.write(s)
         self.conf.set("THEME", s)
         
     def __set_music_playmode(self):
         if self.__playmode == self.SHUNXU_MODE:
             self.__playmode = self.RANDOM_MODE
-            self.playmodeBtn['text'] = "随"
+            #self.playmodeBtn['text'] = "随"
+            self.playmodeBtn['image'] = self.__random_play_img
         elif self.__playmode == self.RANDOM_MODE:
             self.__playmode = self.SINGLE_MODE
-            self.playmodeBtn['text'] = "单"
+            self.playmodeBtn['image'] = self.__single_play_img
         elif self.__playmode == self.SINGLE_MODE:
             self.__playmode = self.SHUNXU_MODE
-            self.playmodeBtn['text'] = "顺"
+            self.playmodeBtn['image'] = self.__shunxu_play_img
         self.conf.set("MODE", "{}".format(self.__playmode))
     
     def __about_info(self):
-        tkinter.messagebox.showinfo('About Me', 'QQ:334862088 注明来意\r\n邮箱:duanbixing@163.com')
+        msg = "QQ:334862088 注明来意\r\n邮箱:duanbixing@163.com\r\nTEMPDIR:{}".format(TEMPDIR)
+        tkinter.messagebox.showinfo('About Me', msg)
         
     def __create_window(self):
         #self.root = Tk()
@@ -288,7 +363,7 @@ class BigFishMusicPlayer():
         self.root.title("BFMPlayer")
         
         window_size_w = 200
-        window_size_h = 360
+        window_size_h = 380
         object_h_seq = 20
         
         w = self.root.winfo_screenwidth()
@@ -343,46 +418,6 @@ class BigFishMusicPlayer():
         self.popmenu.add_command(label = "置        顶", command = self.__playlist_item_settop)
         self.popmenu.add_command(label = "从列表中删除", command = self.__playlist_item_delete)
         
-        '''
-        #grid布局方式
-        f = Frame(self.root)
-        f.pack()
-        
-        self.music_name_label = ttk.Label(f, text='')
-        self.music_name_label.grid(row=0, column=0, padx=10)
-        self.music_time_label = ttk.Label(f, text='')
-        self.music_time_label.grid(row=0, column=1, padx=10)
-        scale = ttk.Scale(f, from_=0, to=100, orient=HORIZONTAL, command = self.set_vol)
-        scale.set(70)  # implement the default value of scale when music player starts
-        pygame.mixer.music.set_volume(0.7)
-        scale.grid(row=0, column=2, pady=10, padx=50)
-        self.pretBtn = ttk.Button(f, text="上一首", command = self.__music_pret)
-        self.pretBtn.grid(row=0, column=3, padx=10)
-        self.playBtn = ttk.Button(f, text="播放", command = self.play_music)
-        self.playBtn.grid(row=0, column=4, padx=10)
-        self.nextBtn = ttk.Button(f, text="下一首", command = self.__music_next)
-        self.nextBtn.grid(row=0, column=5, padx=10)
-        #self.playBtn["state"] = DISABLED / NORMAL
-        
-        sc = Scrollbar(f)
-        sc.grid(row=1, column=1, pady=50)
-        self.playlistbox = Listbox(f, selectmode=SINGLE, yscrollcommand=sc.set)
-        self.playlistbox.grid(row=1, column=0, padx=50, pady=50)
-        self.playlistbox.bind("<Double-Button-1>", self.__double_click_playlist_item)
-        sc.config(command=self.playlistbox.yview)
-        if os.path.exists(self.PLAYLIST_FILE):
-            with open(self.PLAYLIST_FILE, 'r') as f:
-                while True:
-                    m = f.readline()
-                    if len(m) == 0:
-                        break
-                    m = m.replace('\n', '')
-                    print(m)
-                    print("-------")
-                    self.music_file_list.append(m)
-                    n = os.path.basename(m)
-                    self.playlistbox.insert("end", n)
-        '''
         #place布局方式
         listbox_h = 240
         self.music_name_label = ttk.Label(self.root, text='')
@@ -393,20 +428,37 @@ class BigFishMusicPlayer():
         self.music_count_label = ttk.Label(self.root, text='')
         self.music_count_label.place(x=4, y=listbox_h + 30, width=60, height=22)
         
-        self.playmodeBtn = ttk.Button(self.root, text="顺", command = self.__set_music_playmode)
-        self.playmodeBtn.place(x=window_size_w-40, y=listbox_h, width=30, height=30)
+        self.__random_play_img = PhotoImage(file=self.__button_img_random)
+        self.__single_play_img = PhotoImage(file=self.__button_img_single)
+        self.__shunxu_play_img = PhotoImage(file=self.__button_img_shunxu)
+        #self.playmodeBtn = ttk.Button(self.root, text="顺", command = self.__set_music_playmode)
+        self.playmodeBtn = Button(self.root, image=self.__shunxu_play_img, command = self.__set_music_playmode)
+        self.playmodeBtn.place(x=window_size_w-40, y=listbox_h+15, width=30, height=30)
         
+        #volume set
         self.scale = ttk.Scale(self.root, from_=0, to=100, orient=HORIZONTAL, command = self.set_vol)
         self.scale.set(70)  # implement the default value of scale when music player starts
         pygame.mixer.music.set_volume(0.7)
         self.scale.place(x=10, y=listbox_h  + 22 + 30, width=window_size_w - 20, height=22)
+        #时间进度条
+        self.musciplay_time_scale = ttk.Scale(self.root, from_=0, to=100, orient=HORIZONTAL, command = self.set_musci_play_time)
+        #self.musciplay_time_scale = ttk.Scale(self.root, from_=0, to=100, orient=HORIZONTAL, command = lambda var=0: self.set_musci_play_time(var, False))
+        self.musciplay_time_scale.set(0)
+        self.musciplay_time_scale.place(x=10, y=listbox_h  + 22 + 30 + 30, width=window_size_w - 20, height=22)
         
-        self.pretBtn = ttk.Button(self.root, text="上一首", command = self.__music_pret)
-        self.pretBtn.place(x=10, y=listbox_h + object_h_seq + 22 + object_h_seq + 22, width=int((window_size_w - 40)/3), height=30)
-        self.playBtn = ttk.Button(self.root, text="播放", command = self.play_music)
-        self.playBtn.place(x=20 + int((window_size_w - 40)/3), y=listbox_h + object_h_seq + 22 + object_h_seq + 22, width=int((window_size_w - 40)/3), height=30)
-        self.nextBtn = ttk.Button(self.root, text="下一首", command = self.__music_next)
-        self.nextBtn.place(x=30 + int((window_size_w - 40)/3)*2, y=listbox_h + object_h_seq + 22 + object_h_seq + 22, width=int((window_size_w - 40)/3), height=30)
+        self.prex_img = PhotoImage(file=self.__button_img_prex)
+        self.logger.info("w={} h={}".format(self.prex_img.width(), self.prex_img.height()))
+        self.pretBtn = Button(self.root, image=self.prex_img, command = self.__music_pret)
+        #self.pretBtn.place(x=10, y=listbox_h + object_h_seq + 22 + object_h_seq + 22 + 30, width=int((window_size_w - 40)/3), height=30)
+        self.pretBtn.place(x=10, y=listbox_h + object_h_seq + 22 + object_h_seq + 22 + 30, width=40, height=20)
+        self.play_img = PhotoImage(file=self.__button_img_play)
+        self.pause_img = PhotoImage(file=self.__button_img_pause)
+        #self.playBtn = ttk.Button(self.root, text="播放", command = self.play_music)
+        self.playBtn = Button(self.root, image=self.play_img, command = self.play_music)
+        self.playBtn.place(x=20 + int((window_size_w - 40)/3), y=listbox_h + object_h_seq + 22 + object_h_seq + 22 + 30, width=40, height=20)
+        self.next_img = PhotoImage(file=self.__button_img_next)
+        self.nextBtn = Button(self.root, image=self.next_img, command = self.__music_next)
+        self.nextBtn.place(x=30 + int((window_size_w - 40)/3)*2, y=listbox_h + object_h_seq + 22 + object_h_seq + 22 + 30, width=40, height=20)
 
         scrollbar_w = 20
         sc = Scrollbar(self.root)
@@ -414,7 +466,7 @@ class BigFishMusicPlayer():
         self.playlistbox = Listbox(self.root, selectmode=SINGLE, yscrollcommand=sc.set)
         self.playlistbox.place(x=0, y=0, width=window_size_w - scrollbar_w, height=240)
         self.playlistbox.bind("<Double-Button-1>", self.__double_click_playlist_item)
-        self.playlistbox.bind("<Button-3>", self.__rightclick_playlist_item)
+        self.playlistbox.bind("<Button-3>", self.__right_click_playlist_item)
         sc.config(command=self.playlistbox.yview)
         if os.path.exists(self.PLAYLIST_FILE):
             with open(self.PLAYLIST_FILE, 'r') as f:
@@ -426,7 +478,7 @@ class BigFishMusicPlayer():
                     self.music_file_list.append(m)
                     n = os.path.basename(m)
                     self.playlistbox.insert("end", n)
-        
+
     def forever(self):
         self.root.mainloop()
 
@@ -435,15 +487,43 @@ class BigFishMusicPlayer():
             try:
                 if pygame.mixer.music.get_busy() is True:
                     t = int(pygame.mixer.music.get_pos() / 1000)
+                    t += self.__curr_musicplay_ts
+                    #self.logger.info("t={}".format(t))
                     cmins, csecs = divmod(t, 60)
                     cmins = round(cmins)
                     csecs = round(csecs)
                     self.music_time_label['text'] = "{:02d}:{:02d} / {:02d}:{:02d}".format(cmins, csecs, self.music_time_mins, self.music_time_secs)
+                    self.__is_setpos_inuse = True
+                    self.musciplay_time_scale.set(t)
+                    self.__is_setpos_inuse = False
                 for event in pygame.event.get():
                     if event.type == self.musci_end_event:
                         self.music_time_label['text'] = "{:02d}:{:02d} / {:02d}:{:02d}".format(0, 0, self.music_time_mins, self.music_time_secs)
-                        self.playBtn['text'] = "播放"
-                        print("musci_end_event")
+                        #self.playBtn['text'] = "播放"
+                        self.playBtn['image'] = self.play_img
+                        #self.logger.info("musci_end_event")
+                        if self.__is_play_m4a_file is True:
+                            if self.cm4a_playno < len(self.cm4a_list) - 2:
+                                self.cm4a_playno += 1
+                                self.__curr_musicplay_ts = self.cm4a.first_section_times + ((self.cm4a_playno - 1) * self.cm4a.section_times)
+                                self.logger.info("self.__curr_musicplay_ts:{} no={}".format(self.__curr_musicplay_ts, self.cm4a_playno))
+                                if pygame.mixer.music.get_busy() is False:
+                                    pygame.mixer.music.load(self.cm4a_list[self.cm4a_playno])
+                                    self.play_music()
+                                    pygame.mixer.music.queue(self.cm4a_list[self.cm4a_playno+1])
+                                else:
+                                    pygame.mixer.music.queue(self.cm4a_list[self.cm4a_playno+1])
+                                self.playBtn['image'] = self.pause_img
+                                continue
+                            elif self.cm4a_playno == len(self.cm4a_list) - 2:
+                                self.cm4a_playno += 1
+                                self.__curr_musicplay_ts = self.cm4a.first_section_times + ((self.cm4a_playno - 1) * self.cm4a.section_times)
+                                self.logger.info("this music last section")
+                                self.playBtn['image'] = self.pause_img
+                                continue
+                            else:
+                                self.__is_play_m4a_file = False
+
                         if self.__playmode == self.SHUNXU_MODE:
                             self.__music_next()
                         elif self.__playmode == self.SINGLE_MODE:
@@ -458,7 +538,6 @@ class BigFishMusicPlayer():
                                     break
                             self.load_music_file(self.music_file_list[self.__curr_play_item_number])
                             self.play_music()
-                            pass
                     elif event.type == self.music_next_event:
                         self.playlistbox.selection_clear(self.__curr_play_item_number)
                         self.__curr_play_item_number += 1
@@ -474,12 +553,11 @@ class BigFishMusicPlayer():
                             self.__curr_play_item_number -= 1
                         self.load_music_file(self.music_file_list[self.__curr_play_item_number])
                         self.play_music()
-                self.music_count_label['text'] = "{}/{}".format( self.__curr_play_item_number, len(self.music_file_list))
-                time.sleep(0.1)
+                self.music_count_label['text'] = "{}/{}".format( self.__curr_play_item_number + 1, len(self.music_file_list))
+                time.sleep(0.2)
             except Exception as e:
-                print("animation err:{}".format(e))
+                self.logger.info("animation err:{}".format(e))
 
-p = BigFishMusicPlayer()
-#p.load_music_file("F:/音乐/JAY/0208.威廉古堡.mp3")
-#p.play_music()
-p.forever()
+if __name__ == "__main__":
+    p = BFMusicPlayer()
+    p.forever()
