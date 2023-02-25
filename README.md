@@ -73,3 +73,26 @@ ffmpeg.exe -i "D:/git/xiangsheng/LIST-A/31号技师.m4a" -ss 00:00:00 -t 00:01:0
 ```
 subprocess.call(['ls', '-la'], shell=True)
 ```
+
+
+### PyQt5-tools 
+
+
+```
+打开designer:
+ pyqt5-tools.exe designer
+
+将生成的ui文件转换成为代码可以使用的py文件
+pyuic5.exe -o qt5player.py qt5player.ui
+
+class Window(QtWidgets.QMainWindow, Ui_qt5player):
+    def __init__(self):
+        super(Window, self).__init__()
+        self.setupUi(self)
+		
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    window = Window()
+    window.show()
+    sys.exit(app.exec_())
+```
